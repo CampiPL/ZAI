@@ -54,19 +54,36 @@ def series_json(row):
             "maxValue": row["max_value"], "color": row["color"], "icon": row["icon"], "unit": row["unit"]}
 
 
+def json_time(value):
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return value
+
+
+def resource_id(value):
+    try:
+        parsed = int(value)
+        return parsed if str(value).isascii() and str(value).isdecimal() and 0 < parsed < 2**63 else None
+    except (ValueError, TypeError):
+        return None
+
+
 def sensor_json(row):
     return {"id": row["id"], "name": row["name"], "seriesId": row["series_id"],
-            "createdAt": row["created_at"], "lastMeasurementAt": row["last_measurement_at"]}
+            "createdAt": json_time(row["created_at"]), "lastMeasurementAt": json_time(row["last_measurement_at"])}
 
 
 def measurement_json(row):
-    result = {"id": row["id"], "seriesId": row["series_id"], "value": row["value"], "timestamp": row["timestamp"]}
+    result = {"id": row["id"], "seriesId": row["series_id"], "value": row["value"], "timestamp": json_time(row["timestamp"])}
     if row["sensor_id"] is not None:
         result["sensorId"] = row["sensor_id"]
     return result
 
 
 def get_row(conn, table, identifier):
+    identifier = resource_id(identifier)
+    if identifier is None:
+        raise Problem(404, "Wybrany zasób nie istnieje.")
     # Table names are internal constants, never client input.
     row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (identifier,)).fetchone()
     if row is None:
@@ -102,7 +119,7 @@ def accept_json(header):
 
 
 def create_app(database_path=None, initial_username=None, initial_password=None):
-    dbpath = str(database_path or os.getenv("DATABASE_PATH", ROOT / "data/splot.sqlite3"))
+    dbpath = str(database_path or os.getenv("DATABASE_URL") or os.getenv("DATABASE_PATH", ROOT / "data/splot.sqlite3"))
     username = initial_username if initial_username is not None else os.getenv("ADMIN_USERNAME", "admin")
     password = initial_password if initial_password is not None else os.getenv("ADMIN_PASSWORD", "")
     ttl = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
@@ -188,7 +205,7 @@ def create_app(database_path=None, initial_username=None, initial_password=None)
         with connect(dbpath, write=True) as conn:
             now = time.time()
             conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (now - 300,))
-            count = conn.execute("SELECT COUNT(*) FROM login_attempts WHERE bucket = ?", (bucket,)).fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) AS count FROM login_attempts WHERE bucket = ?", (bucket,)).fetchone()["count"]
             if count >= 20:
                 raise Problem(429, "Zbyt wiele błędnych prób. Spróbuj za 5 minut.")
             account = conn.execute("SELECT * FROM admins WHERE username = ?", (body.username,)).fetchone()
@@ -241,8 +258,8 @@ def create_app(database_path=None, initial_username=None, initial_password=None)
     def add_series(body: SeriesInput, request: Request):
         with connect(dbpath, write=True) as conn:
             admin(request, conn)
-            rowid = conn.execute("INSERT INTO series(name,min_value,max_value,color,icon,unit) VALUES (?,?,?,?,?,?)",
-                                 (body.name, body.minValue, body.maxValue, body.color, body.icon, body.unit)).lastrowid
+            rowid = conn.execute("INSERT INTO series(name,min_value,max_value,color,icon,unit) VALUES (?,?,?,?,?,?) RETURNING id",
+                                 (body.name, body.minValue, body.maxValue, body.color, body.icon, body.unit)).fetchone()["id"]
             result = series_json(get_row(conn, "series", rowid))
             changed(conn)
         return JSONResponse(result, status_code=201, headers={"Location": f"/api/series/{rowid}"})
@@ -286,11 +303,12 @@ def create_app(database_path=None, initial_username=None, initial_password=None)
     def add_sensor(body: SensorInput, request: Request):
         with connect(dbpath, write=True) as conn:
             admin(request, conn)
-            if not conn.execute("SELECT 1 FROM series WHERE id=?", (body.seriesId,)).fetchone():
+            series_id = resource_id(body.seriesId)
+            if series_id is None or not conn.execute("SELECT 1 FROM series WHERE id=?", (series_id,)).fetchone():
                 raise Problem(422, "Wybrana seria nie istnieje.")
             key = secrets.token_urlsafe(32)
-            rowid = conn.execute("INSERT INTO sensors(name,series_id,key_hash,created_at) VALUES (?,?,?,?)",
-                                 (body.name, body.seriesId, digest(key), now_iso())).lastrowid
+            rowid = conn.execute("INSERT INTO sensors(name,series_id,key_hash,created_at) VALUES (?,?,?,?) RETURNING id",
+                                 (body.name, series_id, digest(key), now_iso())).fetchone()["id"]
             result = sensor_json(get_row(conn, "sensors", rowid)) | {"apiKey": key}
             changed(conn)
         return JSONResponse(result, status_code=201, headers={"Location": f"/api/sensors/{rowid}"})
@@ -316,8 +334,8 @@ def create_app(database_path=None, initial_username=None, initial_password=None)
                 raise Problem(422, f"Wartość musi należeć do przedziału [{series['min_value']}, {series['max_value']}].")
             if datetime.fromisoformat(body.timestamp.replace("Z", "+00:00")).timestamp() > time.time() + 300:
                 raise Problem(422, "Pomiar nie może pochodzić z przyszłości dalszej niż 5 minut.")
-            rowid = conn.execute("INSERT INTO measurements(series_id,sensor_id,value,timestamp) VALUES (?,?,?,?)",
-                                 (sensor["series_id"], sensor["id"], body.value, body.timestamp)).lastrowid
+            rowid = conn.execute("INSERT INTO measurements(series_id,sensor_id,value,timestamp) VALUES (?,?,?,?) RETURNING id",
+                                 (sensor["series_id"], sensor["id"], body.value, body.timestamp)).fetchone()["id"]
             conn.execute("UPDATE sensors SET last_measurement_at = CASE WHEN last_measurement_at IS NULL OR last_measurement_at < ? THEN ? ELSE last_measurement_at END WHERE id=?",
                          (body.timestamp, body.timestamp, sensor["id"]))
             changed(conn)
@@ -341,7 +359,7 @@ def create_app(database_path=None, initial_username=None, initial_password=None)
                 if len(ids) > 100 or any(not x.strip() for x in ids):
                     raise ValueError()
                 clauses.append("series_id IN (" + ",".join("?" for _ in ids) + ")")
-                params.extend(ids)
+                params.extend(resource_id(identifier) or 0 for identifier in ids)
             for column, operator, value in [("timestamp", ">=", start), ("timestamp", "<=", end)]:
                 if value:
                     clauses.append(f"{column} {operator} ?")
@@ -361,12 +379,15 @@ def create_app(database_path=None, initial_username=None, initial_password=None)
 
     @app.get("/api/events")
     async def events(request: Request):
+        def read_revision():
+            with connect(dbpath) as conn:
+                return conn.execute("SELECT revision FROM changes WHERE id=1").fetchone()["revision"]
+
         async def stream():
             revision = None
             heartbeat = 0
             while not await request.is_disconnected():
-                with connect(dbpath) as conn:
-                    current = conn.execute("SELECT revision FROM changes WHERE id=1").fetchone()[0]
+                current = await asyncio.to_thread(read_revision)
                 if current != revision:
                     yield f"event: update\ndata: {json.dumps({'revision': current})}\n\n"
                     revision = current

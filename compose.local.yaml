@@ -1,0 +1,18 @@
+name: splot-local
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SPLOT_LOCAL_PORT:-8080}:8000"
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Uruchom python3 scripts/setup.py}
+      DATABASE_PATH: /app/data/splot.sqlite3
+      SESSION_TTL_SECONDS: 3600
+      REQUIRE_HTTPS: "false"
+      FORWARDED_ALLOW_IPS: "*"
+    volumes:
+      - splot_local_data:/app/data
+volumes:
+  splot_local_data:

@@ -1,22 +1,42 @@
 import concurrent.futures
 import hashlib
-import sqlite3
+import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import psycopg
+from psycopg import sql
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
+from backend.db import connect
 
 PASSWORD = "Testing-secret-2026"
 
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(tmp_path / "test.sqlite3", "admin", PASSWORD)
-    with TestClient(app) as c:
-        yield c
+    database = os.getenv("TEST_DATABASE_URL")
+    schema = "test_" + uuid.uuid4().hex
+    if database:
+        with psycopg.connect(database, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        url = urlsplit(database)
+        query = dict(parse_qsl(url.query)) | {"options": "-csearch_path=" + schema}
+        path = urlunsplit(url._replace(query=urlencode(query)))
+    else:
+        path = tmp_path / "test.sqlite3"
+    try:
+        with TestClient(create_app(path, "admin", PASSWORD)) as c:
+            yield c
+    finally:
+        if database:
+            with psycopg.connect(database, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 def login(client, password=PASSWORD):
@@ -51,10 +71,10 @@ def test_password_change_revokes_all_sessions_and_persists(client):
 
 def test_secrets_are_hashed_and_expired_token_rejected(client):
     auth, _, sensor, _ = setup_sensor(client)
-    with sqlite3.connect(client.app.state.database_path) as conn:
-        assert conn.execute("SELECT password_hash FROM admins").fetchone()[0].startswith("$argon2id$")
-        assert conn.execute("SELECT key_hash FROM sensors").fetchone()[0] == hashlib.sha256(sensor["apiKey"].encode()).hexdigest()
-        stored = conn.execute("SELECT token_hash FROM sessions").fetchone()[0]
+    with connect(client.app.state.database_path, write=True) as conn:
+        assert conn.execute("SELECT password_hash FROM admins").fetchone()["password_hash"].startswith("$argon2id$")
+        assert conn.execute("SELECT key_hash FROM sensors").fetchone()["key_hash"] == hashlib.sha256(sensor["apiKey"].encode()).hexdigest()
+        stored = conn.execute("SELECT token_hash FROM sessions").fetchone()["token_hash"]
         assert stored != auth["Authorization"].split()[1]
         conn.execute("UPDATE sessions SET expires_at=?", (time.time() - 1,))
     assert client.get("/api/sensors", headers=auth).status_code == 401
@@ -149,3 +169,12 @@ def test_unknown_resource_and_sensor_validation(client):
     assert response.status_code == 404
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.json()["status"] == 404
+
+
+@pytest.mark.parametrize("identifier", ["abc", "999999999999999999999999999999999", "-1"])
+def test_non_numeric_or_out_of_range_ids(client, identifier):
+    auth = token(client)
+    for resource in ("series", "sensors", "measurements"):
+        assert client.get(f"/api/{resource}/{identifier}", headers=auth).status_code == 404
+    assert client.post("/api/sensors", headers=auth, json={"name": "S", "seriesId": identifier}).status_code == 422
+    assert client.get(f"/api/measurements?series={identifier}").json() == []

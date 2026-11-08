@@ -1,12 +1,23 @@
 # Splot — obserwatorium mikroklimatu
 
-Projekt ZAI 26Z: FastAPI + React SPA + SQLite. Czytelnik ogląda wykres i tabelę, administrator zarządza seriami i czujnikami, a emulator przesyła pomiary przez API. Interfejs i komunikaty są po polsku.
+Projekt ZAI 26Z: FastAPI + React SPA + SQLite/PostgreSQL. Czytelnik ogląda wykres i tabelę, administrator zarządza seriami i czujnikami, a emulator przesyła pomiary przez API. Interfejs i komunikaty są po polsku.
 
 Zaimplementowano F1–F13, wspólny kontrakt REST, trwałą bazę z migracją, generator, wydruk, responsywny widok, testy i dodatkowe odświeżanie przez SSE. Przykładowe dane: Szklarnia, Ogród zimowy i Taras, po 72 pomiary temperatury. Dane tworzy generator przez API.
 
-**Stan oddania:** implementacja i lokalna weryfikacja są gotowe. Publiczne wdrożenie, zdalne repozytorium, wykonanie nagrania na publicznym adresie i wysłanie formularza Leia wymagają docelowego hostingu/repozytorium oraz uzupełnienia danych. Lokalny ZIP/PDF nie jest zgłoszeniem. E1 miał termin 7.11.2026; zgodnie ze specyfikacją można dołączyć go do E2 (21.11.2026) za maksymalnie 5 pkt.
+**Stan oddania:** implementacja i lokalna weryfikacja są gotowe. Repozytorium jest opublikowane pod adresem https://github.com/CampiPL/ZAI (branch `main`). Publiczne wdrożenie, nagranie na publicznym adresie i wysłanie formularza Leia wymagają jeszcze skonfigurowania hostingu oraz uzupełnienia danych. Lokalny ZIP/PDF nie jest zgłoszeniem. E1 miał termin 7.11.2026; zgodnie ze specyfikacją można dołączyć go do E2 (21.11.2026) za maksymalnie 5 pkt.
 
-## Szybki start
+## Docker i hosting — zacznij tutaj
+
+Pełna instrukcja: [docs/WDROZENIE.md](docs/WDROZENIE.md). `compose.local.yaml` uruchamia aplikację lokalnie pod http://127.0.0.1:8080; `render.yaml` przygotowuje publiczną usługę **Render Free**, a trwałe dane przechowuje **Neon Free (PostgreSQL)**. Oba plany są bezpłatne w swoich limitach. Render usypia usługę po 15 minutach bez ruchu; pierwsze otwarcie może potrwać około minuty. Konta i połączenie z hostingiem trzeba skonfigurować według instrukcji.
+
+Po zainstalowaniu Dockera i utworzeniu `.env`:
+
+```bash
+docker compose -f compose.local.yaml up -d --build --wait
+docker compose -f compose.local.yaml exec -T app /app/.venv/bin/python -m generator.seed_demo --api http://127.0.0.1:8000
+```
+
+## Szybki start bez kontenerów
 
 Wymagane: Python 3.12+, `uv`, Node.js 22.12+ z npm. Zweryfikowano na Python 3.12.16 i Node 22.23.4. Wersje zależności są zapisane w `uv.lock` i `frontend/package-lock.json`.
 
@@ -63,6 +74,8 @@ Parametry: `--api`, `--key` (alternatywnie zmienne powyżej), `--count` (0 = do 
 
 ```bash
 uv run pytest -q
+# Opcjonalnie ta sama pula testów na dedykowanym PostgreSQL:
+# TEST_DATABASE_URL=postgresql://... uv run pytest -q
 uv run python scripts/contract.py --stage E1
 # Na publicznym HTTPS, z Chrome/Chromium:
 uv run python scripts/contract.py --stage E2 --app https://TWOJA-DOMENA --lighthouse
@@ -81,10 +94,10 @@ Szczegółowe wyniki: [docs/WERYFIKACJA.md](docs/WERYFIKACJA.md). Workflow `.git
 ## Architektura i bezpieczeństwo
 
 - FastAPI realizuje endpointy dokładnie z kontraktu; błędy mają RFC 9457 `application/problem+json`. Walidacja Pydantic odrzuca złe typy, brakujące pola i wartości niefinitywne.
-- SQLite z WAL jest trwałym magazynem relacyjnym. Migracja: `backend/migrations/001_initial.sql`; model i relacje: [docs/ERD.md](docs/ERD.md). Wybrano SQLite ze względu na pojedynczy host, prostą instalację i łatwe odtworzenie projektu.
+- SQLite z WAL działa lokalnie, PostgreSQL na bezpłatnym hostingu. Niepuste `DATABASE_URL` wybiera PostgreSQL i ma pierwszeństwo przed `DATABASE_PATH`. Migracje: `backend/migrations/001_initial.sql` i `001_initial.postgres.sql`; model i relacje: [docs/ERD.md](docs/ERD.md).
 - `backend/db.py`: hasła Argon2id. `backend/app.py`: kryptograficznie losowe tokeny i klucze 43-znakowe; w bazie SHA-256, nigdy wartości jawne. SHA-256 jest używany dla losowych sekretów, nie haseł.
 - Sesje wygasają (domyślnie 3600 s), logout usuwa token, a zmiana hasła unieważnia wszystkie sesje. React trzyma token tylko w pamięci; odświeżenie strony wymaga ponownego logowania. Nie używa localStorage ani cookies.
-- Parametryzowane SQL i `BEGIN IMMEDIATE` zabezpieczają spójność zakresów. Usunięcie czujnika zachowuje pomiary (`SET NULL`); usunięcie serii kaskadowo usuwa czujniki i pomiary.
+- Parametryzowane SQL oraz serializacja zapisów (`BEGIN IMMEDIATE` w SQLite, transakcyjna blokada advisory w PostgreSQL) zabezpieczają spójność zakresów. Usunięcie czujnika zachowuje pomiary (`SET NULL`); usunięcie serii kaskadowo usuwa czujniki i pomiary.
 - Autoryzacja jest po stronie serwera. Administrator nie może zapisywać pomiarów samym Bearer. Czujnik nie może wybrać innej serii w treści żądania.
 - Limit 20 błędnych logowań na parę adres/login w 5 minut, limit treści 64 KB. Log odrzuceń nie zawiera haseł ani kluczy.
 - CSP bez zewnętrznych skryptów i bez `unsafe-inline`, `nosniff`, blokada ramek, Referrer-Policy, Permissions-Policy, HSTS przy HTTPS. Brak liberalnego CORS; frontend i backend działają w tej samej domenie.
@@ -94,7 +107,9 @@ Szczegółowe wyniki: [docs/WERYFIKACJA.md](docs/WERYFIKACJA.md). Workflow `.git
 
 ## Publiczne wdrożenie
 
-Wymagany jest serwer z Docker Compose, domeną wskazującą na serwer i otwartymi portami 80/443. Dołączona konfiguracja korzysta z Caddy jako reverse proxy z HTTPS i trwałych wolumenów. Nie wymaga płatnej usługi konkretnego dostawcy; koszt serwera/domeny zależy od wybranego miejsca.
+Zalecany wariant bezpłatny Render + Neon opisano krok po kroku w [docs/WDROZENIE.md](docs/WDROZENIE.md). Poniższa alternatywa dotyczy własnego VPS.
+
+Dla VPS wymagany jest serwer z Docker Compose, domeną wskazującą na serwer i otwartymi portami 80/443. Dołączona konfiguracja korzysta z Caddy jako reverse proxy z HTTPS i trwałych wolumenów. Nie wymaga płatnej usługi konkretnego dostawcy; koszt serwera/domeny zależy od wybranego miejsca.
 
 1. Umieść repozytorium na serwerze. Utwórz `.env` przez `scripts/setup.py` lub na bazie `.env.example`, ustaw mocne `ADMIN_PASSWORD` i dodaj `SPLOT_DOMAIN=pomiary.twoja-domena.pl`.
 2. Uruchom `docker compose up -d --build` w katalogu projektu. Do Internetu wystawiany jest Caddy; port backendu pozostaje wewnętrzny.
@@ -103,7 +118,7 @@ Wymagany jest serwer z Docker Compose, domeną wskazującą na serwer i otwartym
 
 Backend ufa `X-Forwarded-*` od wewnętrznego proxy. Nie wystawiaj jego portu przy `FORWARDED_ALLOW_IPS=*`. Nie ustawiaj `REQUIRE_HTTPS=true` dla lokalnego healthchecka z dołączonego Compose; HTTPS wymusza Caddy. SSE ma wyłączone buforowanie. Certyfikaty i baza pozostają w nazwanych wolumenach; `docker compose down -v` usuwa także te dane.
 
-Docker nie był dostępny w środowisku implementacji; obrazu i konfiguracji Compose nie uruchomiono. Publiczne wdrożenie wymaga wskazania hosta i dostępu. Nie używaj nietrwałego systemu plików hostingu dla SQLite. Kopię bazy wykonuj przez SQLite Backup API albo po zatrzymaniu aplikacji, z uwzględnieniem plików WAL; samego aktywnego pliku `.sqlite3` nie należy kopiować jako kompletnej kopii.
+Docker Engine i Compose zainstalowano. Wyniki sprawdzenia kontenera: [docs/WERYFIKACJA.md](docs/WERYFIKACJA.md). Publiczne wdrożenie wymaga dostępu do kont Render i Neon. Nie używaj nietrwałego systemu plików hostingu dla SQLite. Kopię bazy wykonuj przez SQLite Backup API albo po zatrzymaniu aplikacji, z uwzględnieniem plików WAL; samego aktywnego pliku `.sqlite3` nie należy kopiować jako kompletnej kopii.
 
 ## Dokumentacja i oddanie
 
@@ -113,9 +128,11 @@ Docker nie był dostępny w środowisku implementacji; obrazu i konfiguracji Com
 - Po wdrożeniu: `uv run python scripts/documentation.py --url https://TWOJA-DOMENA --repo https://ADRES-REPO --submission`. Hasło konta zgłoszeniowego pobierane jest z `ADMIN_PASSWORD`, nigdy z argumentu. Prywatny PDF trafia do `artifacts/dokumentacja-oddanie.pdf`, poza Git.
 - `uv run python scripts/package.py` tworzy `artifacts/splot-zai-26z.zip`. Po uzupełnieniu zgłoszenia użyj `--documentation artifacts/dokumentacja-oddanie.pdf`, aby podmienić PDF wewnątrz ZIP. Taki ZIP zawiera dane konta dla prowadzącego — przekazuj go formularzem kursu.
 
-Repozytorium Git zainicjalizowano lokalnie. Historia rozpoczyna się faktyczną implementacją 8.11.2026; nie rekonstruowano fikcyjnych wcześniejszych commitów. Adres zdalnego repozytorium nie jest jeszcze skonfigurowany.
+Repozytorium: https://github.com/CampiPL/ZAI, branch `main`. Historia rozpoczyna się faktyczną implementacją 8.11.2026; nie rekonstruowano fikcyjnych wcześniejszych commitów.
 
 ## Źródła i deklaracja AI
+
+Ta informacja wynika ze specyfikacji przedmiotu: w „Dokumentacja PDF” punkt 7 wymaga deklaracji użycia AI, a „Zasady realizacji” nakazują podać wykorzystane narzędzia i zakres pomocy oraz źródła fragmentów kodu przejętych z zewnątrz. Prowadzący wymaga deklaracji w PDF; umieszczenie jej również w README jest decyzją porządkową autora dokumentacji, a nie dodatkowym wymaganiem narzędzia.
 
 Wymagania i testy: materiały prowadzącego ZAI 26Z w workspace i `vendor/`. Dokumentacja techniczna użyta przy realizacji: [FastAPI — Docker](https://fastapi.tiangolo.com/deployment/docker/), [React — useEffect](https://react.dev/reference/react/useEffect), [Caddy — reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy). Biblioteki i ich licencje: `frontend/package-lock.json`, `uv.lock` oraz metadane pakietów; ikony Lucide (ISC), React/Vite (MIT). Z materiałów dydaktycznych AngularJS/GWT nie kopiowano implementacji aplikacji.
 

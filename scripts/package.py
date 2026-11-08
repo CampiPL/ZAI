@@ -9,7 +9,7 @@ p = argparse.ArgumentParser()
 p.add_argument("--documentation", type=Path, help="Opcjonalny prywatny PDF do oddania")
 o = p.parse_args()
 allowed_dirs = {"backend", "frontend", "generator", "scripts", "tests", "docs", "vendor", ".github"}
-allowed_files = {"README.md", "pyproject.toml", "uv.lock", ".python-version", ".env.example", ".gitignore", ".dockerignore", "Dockerfile", "compose.yaml", "Caddyfile"}
+allowed_files = {"README.md", "pyproject.toml", "uv.lock", ".python-version", ".env.example", ".gitignore", ".dockerignore", "Dockerfile", "compose.yaml", "compose.local.yaml", "render.yaml", "Caddyfile"}
 excluded = {"node_modules", "dist", "__pycache__", ".pytest_cache", "test-results", "playwright-report"}
 output = root / "artifacts/splot-zai-26z.zip"
 output.parent.mkdir(exist_ok=True)
