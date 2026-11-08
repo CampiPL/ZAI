@@ -1,0 +1,39 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Ustaw ADMIN_PASSWORD w .env}
+      DATABASE_PATH: /app/data/splot.sqlite3
+      SESSION_TTL_SECONDS: 3600
+      # HTTP jest dostępne wyłącznie wewnątrz sieci kontenerów.
+      # Caddy wymusza HTTPS i dostarcza zaufane X-Forwarded-*.
+      REQUIRE_HTTPS: "false"
+      FORWARDED_ALLOW_IPS: "*"
+    volumes:
+      - splot_data:/app/data
+    networks: [splot]
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SPLOT_DOMAIN: ${SPLOT_DOMAIN:?Ustaw SPLOT_DOMAIN np. pomiary.example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [splot]
+volumes:
+  splot_data:
+  caddy_data:
+  caddy_config:
+networks:
+  splot:

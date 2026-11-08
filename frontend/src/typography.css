@@ -1,2 +1,7 @@
 /* System fonts keep the application self-contained, including offline and print. */
-@font-face{font-family:'Splot Sans';src:local('Inter'),local('Aptos'),local('Segoe UI'),local('Arial');font-weight:100 900;font-display:swap}
+@font-face {
+  font-family: "Splot Sans";
+  src: local("Inter"), local("Aptos"), local("Segoe UI"), local("Arial");
+  font-weight: 100 900;
+  font-display: swap;
+}
